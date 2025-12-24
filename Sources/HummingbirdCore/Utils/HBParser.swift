@@ -159,11 +159,24 @@ extension Parser {
     /// - Returns: String read from buffer
     @discardableResult package mutating func read(until: Unicode.Scalar, throwOnOverflow: Bool = true) throws -> Parser {
         let startIndex = self.index
-        while !self.reachedEnd() {
-            if unsafeCurrent() == until {
-                return self.subParser(startIndex..<self.index)
+        // Fast path for ASCII delimiters - directly compare bytes
+        // This is safe because ASCII bytes (0x00-0x7F) can never appear as
+        // continuation bytes in multi-byte UTF8 sequences (which are 0x80-0xBF)
+        if until.value < 128 {
+            let untilByte = UInt8(until.value)
+            while self.index < self.range.endIndex {
+                if self.buffer[self.index] == untilByte {
+                    return self.subParser(startIndex..<self.index)
+                }
+                self.index += 1
             }
-            unsafeAdvance()
+        } else {
+            while !self.reachedEnd() {
+                if unsafeCurrent() == until {
+                    return self.subParser(startIndex..<self.index)
+                }
+                unsafeAdvance()
+            }
         }
         if throwOnOverflow {
             _setPosition(startIndex)
@@ -178,11 +191,50 @@ extension Parser {
     /// - Returns: String read from buffer
     @discardableResult package mutating func read(until characterSet: Set<Unicode.Scalar>, throwOnOverflow: Bool = true) throws -> Parser {
         let startIndex = self.index
-        while !self.reachedEnd() {
-            if characterSet.contains(unsafeCurrent()) {
-                return self.subParser(startIndex..<self.index)
+        // Fast path for small ASCII character sets - extract bytes for direct comparison
+        // This avoids UTF8 decoding and Set hashing in the hot loop
+        var asciiBytes: (UInt8, UInt8, UInt8, UInt8) = (0, 0, 0, 0)
+        var asciiCount = 0
+        var allAscii = true
+        for scalar in characterSet {
+            if scalar.value < 128 && asciiCount < 4 {
+                switch asciiCount {
+                case 0: asciiBytes.0 = UInt8(scalar.value)
+                case 1: asciiBytes.1 = UInt8(scalar.value)
+                case 2: asciiBytes.2 = UInt8(scalar.value)
+                case 3: asciiBytes.3 = UInt8(scalar.value)
+                default: break
+                }
+                asciiCount += 1
+            } else {
+                allAscii = false
+                break
             }
-            unsafeAdvance()
+        }
+        if allAscii && asciiCount <= 4 {
+            // All characters are ASCII - use fast byte comparison
+            while self.index < self.range.endIndex {
+                let byte = self.buffer[self.index]
+                let matches: Bool
+                switch asciiCount {
+                case 1: matches = byte == asciiBytes.0
+                case 2: matches = byte == asciiBytes.0 || byte == asciiBytes.1
+                case 3: matches = byte == asciiBytes.0 || byte == asciiBytes.1 || byte == asciiBytes.2
+                case 4: matches = byte == asciiBytes.0 || byte == asciiBytes.1 || byte == asciiBytes.2 || byte == asciiBytes.3
+                default: matches = false
+                }
+                if matches {
+                    return self.subParser(startIndex..<self.index)
+                }
+                self.index += 1
+            }
+        } else {
+            while !self.reachedEnd() {
+                if characterSet.contains(unsafeCurrent()) {
+                    return self.subParser(startIndex..<self.index)
+                }
+                unsafeAdvance()
+            }
         }
         if throwOnOverflow {
             _setPosition(startIndex)
