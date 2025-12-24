@@ -461,16 +461,44 @@ extension Parser {
     /// - Parameter separator: Separator character
     /// - Returns: arrays of sub parsers
     package mutating func split(separator: Unicode.Scalar) -> [Parser] {
+        // Fast path for ASCII separators - pre-count to estimate capacity and avoid exception handling
+        if separator.value < 128 {
+            let separatorByte = UInt8(separator.value)
+
+            // Quick count of separators to estimate capacity
+            var count = 1  // At least one segment
+            for i in self.index..<self.range.endIndex {
+                if self.buffer[i] == separatorByte {
+                    count += 1
+                }
+            }
+
+            var subParsers: [Parser] = []
+            subParsers.reserveCapacity(count)
+
+            while self.index < self.range.endIndex {
+                let startIndex = self.index
+                // Scan until separator or end
+                while self.index < self.range.endIndex && self.buffer[self.index] != separatorByte {
+                    self.index += 1
+                }
+                subParsers.append(self.subParser(startIndex..<self.index))
+
+                // Skip separator if found
+                if self.index < self.range.endIndex {
+                    self.index += 1
+                }
+            }
+            return subParsers
+        }
+
+        // General path for non-ASCII separators
         var subParsers: [Parser] = []
         while !self.reachedEnd() {
-            do {
-                let section = try read(until: separator)
-                subParsers.append(section)
+            let section = try! read(until: separator, throwOnOverflow: false)
+            subParsers.append(section)
+            if !self.reachedEnd() {
                 unsafeAdvance()
-            } catch {
-                if !self.reachedEnd() {
-                    subParsers.append(self.readUntilTheEnd())
-                }
             }
         }
         return subParsers
