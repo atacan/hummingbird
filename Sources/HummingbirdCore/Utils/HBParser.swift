@@ -288,37 +288,112 @@ extension Parser {
     /// - Throws: .overflow, .emptyString
     /// - Returns: String read from buffer
     @discardableResult package mutating func read(untilString: String, throwOnOverflow: Bool = true, skipToEnd: Bool = false) throws -> Parser {
+        // Fast path for short ASCII strings (up to 8 bytes) - avoids withUTF8 closure overhead
+        let count = untilString.utf8.count
+        guard count > 0 else { throw Error.emptyString }
+
+        if count <= 8 {
+            // Extract bytes directly for short strings
+            var searchBytes: (UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8) = (0, 0, 0, 0, 0, 0, 0, 0)
+            var i = 0
+            for byte in untilString.utf8 {
+                switch i {
+                case 0: searchBytes.0 = byte
+                case 1: searchBytes.1 = byte
+                case 2: searchBytes.2 = byte
+                case 3: searchBytes.3 = byte
+                case 4: searchBytes.4 = byte
+                case 5: searchBytes.5 = byte
+                case 6: searchBytes.6 = byte
+                case 7: searchBytes.7 = byte
+                default: break
+                }
+                i += 1
+            }
+            return try readUntilBytes(searchBytes, count: count, throwOnOverflow: throwOnOverflow, skipToEnd: skipToEnd)
+        }
+
+        // General path for longer strings
         var untilString = untilString
         return try untilString.withUTF8 { utf8 in
-            guard utf8.count > 0 else { throw Error.emptyString }
-            let startIndex = self.index
-            var foundIndex = self.index
-            var untilIndex = 0
-            while !self.reachedEnd() {
-                if self.buffer[self.index] == utf8[untilIndex] {
-                    if untilIndex == 0 {
-                        foundIndex = self.index
-                    }
-                    untilIndex += 1
-                    if untilIndex == utf8.endIndex {
-                        unsafeAdvance()
-                        if skipToEnd == false {
-                            self.index = foundIndex
-                        }
-                        let result = self.subParser(startIndex..<foundIndex)
-                        return result
-                    }
-                } else {
-                    untilIndex = 0
-                }
-                self.index += 1
-            }
-            if throwOnOverflow {
-                _setPosition(startIndex)
-                throw Error.overflow
-            }
-            return self.subParser(startIndex..<self.index)
+            try self.readUntilUTF8Buffer(utf8, throwOnOverflow: throwOnOverflow, skipToEnd: skipToEnd)
         }
+    }
+
+    /// Internal helper for reading until a short byte sequence
+    private mutating func readUntilBytes(_ bytes: (UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8), count: Int, throwOnOverflow: Bool, skipToEnd: Bool) throws -> Parser {
+        let startIndex = self.index
+        var foundIndex = self.index
+        var matchIndex = 0
+
+        while self.index < self.range.endIndex {
+            let currentByte = self.buffer[self.index]
+            let expectedByte: UInt8
+            switch matchIndex {
+            case 0: expectedByte = bytes.0
+            case 1: expectedByte = bytes.1
+            case 2: expectedByte = bytes.2
+            case 3: expectedByte = bytes.3
+            case 4: expectedByte = bytes.4
+            case 5: expectedByte = bytes.5
+            case 6: expectedByte = bytes.6
+            case 7: expectedByte = bytes.7
+            default: expectedByte = 0
+            }
+
+            if currentByte == expectedByte {
+                if matchIndex == 0 {
+                    foundIndex = self.index
+                }
+                matchIndex += 1
+                if matchIndex == count {
+                    self.index += 1
+                    if !skipToEnd {
+                        self.index = foundIndex
+                    }
+                    return self.subParser(startIndex..<foundIndex)
+                }
+            } else {
+                matchIndex = 0
+            }
+            self.index += 1
+        }
+
+        if throwOnOverflow {
+            _setPosition(startIndex)
+            throw Error.overflow
+        }
+        return self.subParser(startIndex..<self.index)
+    }
+
+    /// Internal helper for reading until a UTF8 buffer
+    private mutating func readUntilUTF8Buffer(_ utf8: UnsafeBufferPointer<UInt8>, throwOnOverflow: Bool, skipToEnd: Bool) throws -> Parser {
+        let startIndex = self.index
+        var foundIndex = self.index
+        var untilIndex = 0
+        while self.index < self.range.endIndex {
+            if self.buffer[self.index] == utf8[untilIndex] {
+                if untilIndex == 0 {
+                    foundIndex = self.index
+                }
+                untilIndex += 1
+                if untilIndex == utf8.count {
+                    self.index += 1
+                    if !skipToEnd {
+                        self.index = foundIndex
+                    }
+                    return self.subParser(startIndex..<foundIndex)
+                }
+            } else {
+                untilIndex = 0
+            }
+            self.index += 1
+        }
+        if throwOnOverflow {
+            _setPosition(startIndex)
+            throw Error.overflow
+        }
+        return self.subParser(startIndex..<self.index)
     }
 
     /// Read from buffer from current position until the end of the buffer
